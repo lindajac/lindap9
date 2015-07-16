@@ -55,8 +55,6 @@ struct p9_front_info
 	int ring_ref;
 	struct p9_front_ring ring;
 	unsigned int evtchn, irq;
-	struct request_queue *rq;
-	struct work_struct work;
 	struct gnttab_free_callback callback;
 	struct list_head grants;
 	int is_ready;
@@ -65,21 +63,25 @@ struct p9_front_info
 
 int data_xfer [2048];
 
-static int fill_grant_buffer(struct p9_front_info *info)
+/*static int fill_grant_buffer(struct p9_front_info *info)
 {
-	struct grant *gnt_list_entry;
+       struct grant *gnt_list_entry;
 
+         printk (KERN_INFO "fillgrantbuffer");
+	 
 	gnt_list_entry = kzalloc(sizeof(struct grant), GFP_NOIO);
 	if (!gnt_list_entry)
 		goto out_of_memory;
 
 	gnt_list_entry->gref = GRANT_INVALID_REF;
 	list_add(&gnt_list_entry->node, &info->grants);
+  printk (KERN_INFO "exiting\n");
 	return 0;
-
 out_of_memory:
+        printk (KERN_INFO "exiting error ENOMEM\n");
 	return -ENOMEM;
-}
+  
+	}*/
 
 
 static struct grant *get_grant(grant_ref_t *gref_head,
@@ -89,31 +91,41 @@ static struct grant *get_grant(grant_ref_t *gref_head,
 	struct grant *gnt_list_entry;
 	unsigned long buffer_mfn;
 
-	BUG_ON(list_empty(&info->grants));
-	gnt_list_entry = list_first_entry(&info->grants, struct grant,
+  printk (KERN_INFO "getgrant");
+        BUG_ON(list_empty(&info->grants));
+	/*	gnt_list_entry = list_first_entry(&info->grants, struct grant,
 	                                  node);
 	list_del(&gnt_list_entry->node);
 
 	if (gnt_list_entry->gref != GRANT_INVALID_REF) {
-		return gnt_list_entry;
-	}
+ printk (KERN_INFO "exiting1\n");
+	  return gnt_list_entry;
+	  }*/
+	gnt_list_entry = kzalloc(sizeof(struct grant), GFP_NOIO);
+	if (!gnt_list_entry)
+		goto out_of_memory;
 
 	/* Assign a gref to this page */
 	gnt_list_entry->gref = gnttab_claim_grant_reference(gref_head);
-	BUG_ON(gnt_list_entry->gref == -ENOSPC);
+		BUG_ON(gnt_list_entry->gref == -ENOSPC);
 	gnt_list_entry->pfn = pfn;
 
 	buffer_mfn = pfn_to_mfn(gnt_list_entry->pfn);
 	gnttab_grant_foreign_access_ref(gnt_list_entry->gref,
 	                                info->xbdev->otherend_id,
 	                                buffer_mfn, 0);
-	return gnt_list_entry;
+ printk (KERN_INFO "exiting normal\n");
+        return gnt_list_entry;
+	out_of_memory:
+ printk (KERN_INFO "exiting error ENOMEM\n");
+ ///FIX MEMEMEMME
+	return -ENOMEM;
 }
 
 
 static void p9_free(struct p9_front_info *info, int suspend)
 {
-
+  printk (KERN_INFO "free");
 	/* Prevent new requests being issued until we fix things up. */
 	spin_lock_irq(&info->io_lock);
 	info->connected = suspend ?
@@ -132,6 +144,7 @@ static void p9_free(struct p9_front_info *info, int suspend)
 	if (info->irq)
 		unbind_from_irqhandler(info->irq, info);
 	info->evtchn = info->irq = 0;
+ printk (KERN_INFO "exiting\n");
 }
 
 static irqreturn_t p9_interrupt(int irq, void *dev_id)
@@ -143,7 +156,8 @@ static irqreturn_t p9_interrupt(int irq, void *dev_id)
 	struct p9_front_info *info = (struct p9_front_info *)dev_id;
 	int error;
 
-	spin_lock_irqsave(&info->io_lock, flags);
+  printk (KERN_INFO "interrupt");
+        spin_lock_irqsave(&info->io_lock, flags);
 
  again:
 	rp = info->ring.sring->rsp_prod;
@@ -165,20 +179,26 @@ static irqreturn_t p9_interrupt(int irq, void *dev_id)
 	if (i != info->ring.req_prod_pvt) {
 		int more_to_do;
 		RING_FINAL_CHECK_FOR_RESPONSES(&info->ring, more_to_do);
-		if (more_to_do)
+		if (more_to_do)	  {
+		  //I shouldn't be here
+		   printk (KERN_INFO "yikes\n");
 			goto again;
+		}
 	} else
 		info->ring.sring->rsp_event = i + 1;
 
 
 	spin_unlock_irqrestore(&info->io_lock, flags);
-
+ printk (KERN_INFO "exiting\n");
 	return IRQ_HANDLED;
 }
 
 static int p9front_is_ready (struct xenbus_device *dev)
 {
-  struct p9_front_info *info  = dev_get_drvdata (&dev->dev);
+    struct p9_front_info *info; 
+    printk (KERN_INFO "isready");
+    info  = dev_get_drvdata (&dev->dev);
+ printk (KERN_INFO "exiting\n");
   return info->is_ready;
 }  
 
@@ -188,11 +208,14 @@ static int setup_9p_ring(struct xenbus_device *dev,
 	struct p9_sring *sring;
 	int err;
 
+  printk (KERN_INFO "setup9pring");
 	info->ring_ref = GRANT_INVALID_REF;
+	
 
 	sring = (struct p9_sring *)__get_free_page(GFP_NOIO | __GFP_HIGH);
 	if (!sring) {
 		xenbus_dev_fatal(dev, -ENOMEM, "allocating shared ring");
+		 printk (KERN_INFO "exiting enomem\n");
 		return -ENOMEM;
 	}
 	SHARED_RING_INIT(sring);
@@ -205,10 +228,11 @@ static int setup_9p_ring(struct xenbus_device *dev,
 		goto fail;
 	}
 	info->ring_ref = err;
-
+	printk (KERN_INFO "ring ref is %d \n",info->ring_ref);
 	err = xenbus_alloc_evtchn(dev, &info->evtchn);
 	if (err)
 		goto fail;
+	printk (KERN_INFO "evtchn is %d \n",info->evtchn);
 
 	err = bind_evtchn_to_irqhandler(info->evtchn, p9_interrupt, 0,
 					"p9", info);
@@ -218,9 +242,12 @@ static int setup_9p_ring(struct xenbus_device *dev,
 		goto fail;
 	}
 	info->irq = err;
+	printk (KERN_INFO "info->irq is %d \n",info->irq);
 
-	return 0;
+ printk (KERN_INFO "exiting\n");
+        return 0;
 fail:
+	printk (KERN_INFO "exiting at fail\n");
 	p9_free(info, 0);
 	return err;
 }
@@ -233,7 +260,7 @@ static int talk_to_9p_back(struct xenbus_device *dev,
 	struct xenbus_transaction xbt;
 	int err;
 
-
+  printk (KERN_INFO "talkto9pback");
 /* Create shared ring, alloc event channel. */
 	err = setup_9p_ring(dev, info);
 	if (err)
@@ -269,16 +296,19 @@ again:
 	}
 
 	xenbus_switch_state(dev, XenbusStateInitialised);
-
+ printk (KERN_INFO "exiting\n");
 	return 0;
 
  abort_transaction:
 	xenbus_transaction_end(xbt, 1);
 	if (message)
 		xenbus_dev_fatal(dev, err, "%s", message);
+	 printk (KERN_INFO "aborting\n");
  destroy_p9ring:
+	  printk (KERN_INFO "cleaningup \n");
 	p9_free(info, 0);
  out:
+	 printk (KERN_INFO "exiting\n");
 	return err;
 }
 
@@ -293,19 +323,27 @@ static int p9front_probe(struct xenbus_device *dev,
 {
       struct p9_front_info *info;
       int  err;
-
+  printk (KERN_INFO "probe");
       info = kzalloc (sizeof (*info), GFP_KERNEL);
       if (!info) {
 	xenbus_dev_fatal (dev, -ENOMEM, "allocating info struct");
+ printk (KERN_INFO "exiting enomem\n");
 	return -ENOMEM;
       }
+      spin_lock_init(&info->io_lock);
+      info->xbdev = dev;
+      info->connected = P9_STATE_DISCONNECTED;
+	/* Front end dir is a number, which is used as the id. */
+      dev_set_drvdata(&dev->dev, info);
       
       err = talk_to_9p_back (dev,info);
       if (err) {
 	kfree (info);
 	dev_set_drvdata (&dev->dev, NULL);
+	 printk (KERN_INFO "exiting err\n");
 	return (err);
       }
+       printk (KERN_INFO "exiting\n");
       return 0;
 }
 
@@ -316,7 +354,7 @@ static int p9front_probe(struct xenbus_device *dev,
  */
 static int p9front_resume(struct xenbus_device *dev)
 {
-	
+  printk (KERN_INFO "resume");	
 	return 0;
 }
 
@@ -324,8 +362,9 @@ static void
 p9front_closing(struct p9_front_info *info)
 {
 	struct xenbus_device *xbdev = info->xbdev;
-
+  printk (KERN_INFO "closing");
 	xenbus_frontend_closed(xbdev);
+	 printk (KERN_INFO "exiting\n");
 }
 
 /*
@@ -334,18 +373,20 @@ p9front_closing(struct p9_front_info *info)
 static void p9front_connect(struct p9_front_info *info)
 {
         grant_ref_t gref_head;
-	struct page *apage;
+	//	struct page *apage;
 	struct xenbus_transaction xbt;
 	int err;
 	const char *message = NULL;
 	struct grant *gnt_list_entry = NULL;
 	
-	err = fill_grant_buffer(info);
+  printk (KERN_INFO "connect");
+  /*err = fill_grant_buffer(info);
 	if (err) {
-		xenbus_dev_fatal(info->xbdev, err, "fill_grant_buffer %s",
+ printk (KERN_INFO "exiting err\n");
+	        xenbus_dev_fatal(info->xbdev, err, "fill_grant_buffer %s",
 				 info->xbdev->otherend);
 		return;
-	}
+		}*/
 	spin_lock_irq(&info->io_lock);
 	xenbus_switch_state(info->xbdev, XenbusStateConnected);
 	info->connected = P9_STATE_CONNECTED;
@@ -354,12 +395,12 @@ static void p9front_connect(struct p9_front_info *info)
 	 * send first piece of data - to test
 	 */
 	data_xfer[0] = 5;
-
-	apage =  (struct page*)data_xfer;
-        gnt_list_entry = get_grant(&gref_head, page_to_pfn(apage), info);
+	
+        gnt_list_entry = get_grant(&gref_head, (unsigned long) virt_to_pfn(data_xfer), info);
 
 	err = xenbus_transaction_start(&xbt);
 	if (err) {
+	   printk (KERN_INFO "exiting err2\n");
 		xenbus_dev_fatal(info->xbdev, err, "starting transaction");
 		goto out;
 	}
@@ -373,10 +414,12 @@ static void p9front_connect(struct p9_front_info *info)
 	spin_unlock_irq(&info->io_lock);
 	return ;
 abort_transaction:
+	 printk (KERN_INFO "exiting abort\n");
 	xenbus_transaction_end(xbt, 1);
 	if (message)
 		xenbus_dev_fatal(info->xbdev, err, "%s", message);
 out:
+	 printk (KERN_INFO "exiting\n");
 	return;
 }
 
@@ -388,6 +431,7 @@ static void p9back_changed(struct xenbus_device *dev,
 {
 	struct p9_front_info *info = dev_get_drvdata(&dev->dev);
 
+  printk (KERN_INFO "back_changed");
 	dev_dbg(&dev->dev, "p9front:p9back_changed to state %d.\n", backend_state);
 
 	switch (backend_state) {
@@ -411,18 +455,21 @@ static void p9back_changed(struct xenbus_device *dev,
 		p9front_closing(info);
 		break;
 	}
+ printk (KERN_INFO "exiting\n");
 }
 
 static int p9front_remove(struct xenbus_device *xbdev)
 {
 	struct p9_front_info *info = dev_get_drvdata(&xbdev->dev);
 
-	dev_dbg(&xbdev->dev, "%s removed", xbdev->nodename);
+  printk (KERN_INFO "remove");
+        dev_dbg(&xbdev->dev, "%s removed", xbdev->nodename);
 
 	p9_free(info, 0);
 
 	info->xbdev = NULL;
 	kfree(info);
+	 printk (KERN_INFO "exiting\n");
 	return 0;
 }
 
@@ -433,7 +480,7 @@ static const struct xenbus_device_id p9front_ids[] = {
 };
 
 static struct xenbus_driver p9front_driver = {
-	.ids  = p9front_ids,
+        .ids = p9front_ids,
 	.probe = p9front_probe,
 	.remove = p9front_remove,
 	.resume = p9front_resume,
@@ -441,12 +488,15 @@ static struct xenbus_driver p9front_driver = {
 	.is_ready = p9front_is_ready,
 };
 
+
 static int __init xlp9_init(void)
 {
 	int ret = 0;
-
+  printk (KERN_INFO "\n\n in p9_init\n");
+        p9front_driver.driver.name = "p9";
+	p9front_driver.driver.owner = THIS_MODULE;
 	ret = xenbus_register_frontend(&p9front_driver);
-
+ printk (KERN_INFO "exiting p9_init\n");
 	return ret;
 }
 module_init(xlp9_init);
@@ -454,7 +504,9 @@ module_init(xlp9_init);
 
 static void __exit xlp9_exit(void)
 {
+    printk (KERN_INFO "exit");
 	xenbus_unregister_driver(&p9front_driver);
+	 printk (KERN_INFO "exiting\n");
 //	kfree(minors);
 }
 module_exit(xlp9_exit);
@@ -463,3 +515,4 @@ MODULE_DESCRIPTION("Xen virtual 9P frontend");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("xen:p9");
 MODULE_ALIAS("xenp9");
+MODULE_AUTHOR("Linda Jacobson");

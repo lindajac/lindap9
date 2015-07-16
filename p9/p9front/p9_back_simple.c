@@ -59,6 +59,7 @@ static void p9_bh(void *opaque)
 {
   //    struct XenP9Dev *p9dev = opaque;
     //    p9_handle_requests(p9dev);
+  printf ("in p9_bh - should I even be here/n");
 }
 
 /*
@@ -74,7 +75,7 @@ static void p9_bh(void *opaque)
 static void p9_alloc(struct XenDevice *xendev)
 {
     struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
-   
+  fprintf (stderr,"in p9_alloc");   
     p9dev->bh = qemu_bh_new(p9_bh, p9dev);
   
     if (xc_gnttab_set_max_grants(xendev->gnttabdev,
@@ -82,43 +83,50 @@ static void p9_alloc(struct XenDevice *xendev)
         xen_be_printf(xendev, 0, "xc_gnttab_set_max_grants failed: %s\n",
                       strerror(errno));
     }
+      fprintf (stderr,"leavin p9_alloc\n");  
 }
 
 static int p9_init(struct XenDevice *xendev)
 {
-    struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
+  //    struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
    
-    /* read xenstore entries */
-    if (p9dev->params == NULL) {
-       goto out_error;
-   }
+    /* 
+     * read xenstore entries -none yet
+     */
+      fprintf (stderr,"in p9_init - again - do I belong here?\n");  
+ 
    return 0;
 
-out_error:
-    return -1;
+   /*out_error:
+     return -1;*/
 }
 
 static void p9_connect(struct XenDevice *xendev)
 {
-  //    struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
+  // struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
     grant_ref_t gref;
     int *page;
     
     // for now
    void *pgref = &gref;
+
+     fprintf (stderr,"in p9_connect\n");  
    if (xenstore_read_fe_int(xendev, "gref",
 			       (int *)pgref) == -1) {
+       fprintf (stderr,"leavin error\n");  
         return;
     }
-   
-    page  = xc_gnttab_map_grant_ref(xendev->gnttabdev,
+   fprintf (stderr, "gref is %u",gref);    
+   page  = xc_gnttab_map_grant_ref(xendev->gnttabdev,
 					   xendev->dom,
                                            gref,
                                            PROT_READ | PROT_WRITE);
     if (!page) {
+       fprintf (stderr,"leavin error2\n");       
         return;
     }
-    printf ("I read %d\n", page[0]);
+    fprintf (stderr,"I read %d\n", page[0]);
+    fprintf (stderr, "leaving now\n");
 }
 
 /*
@@ -128,12 +136,15 @@ static int p9_initwfe(struct XenDevice *xendev)
 {
     struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
  
+    fprintf (stderr,"in initwfe");  
     if (xenstore_read_fe_int(&p9dev->xendev, "ring-ref", &p9dev->ring_ref) == -1)   {
+        fprintf (stderr,"leavin error\n");  
         return -1;
     }
     if (xenstore_read_fe_int(&p9dev->xendev, "event-channel",
                              &p9dev->xendev.remote_port) == -1) {
-        return -1;
+      fprintf (stderr,"leavin error2\n");  
+         return -1;
     }
    
     p9dev->sring = xc_gnttab_map_grant_ref(p9dev->xendev.gnttabdev,
@@ -141,6 +152,7 @@ static int p9_initwfe(struct XenDevice *xendev)
                                             p9dev->ring_ref,
                                             PROT_READ | PROT_WRITE);
     if (!p9dev->sring) {
+        fprintf (stderr,"leavin error3\n");  
         return -1;
     }
 
@@ -152,6 +164,7 @@ static int p9_initwfe(struct XenDevice *xendev)
     xen_be_printf(&p9dev->xendev, 1, "ok: ring-ref %d, "
                    "remote port %d, local port %d\n",
                    p9dev->ring_ref,  p9dev->xendev.remote_port, p9dev->xendev.local_port);
+    fprintf (stderr,"leavin:  ring_ref %d, evt_chn %d local port? %d \n", p9dev->ring_ref,  p9dev->xendev.remote_port, p9dev->xendev.local_port);  
     return 0;
 }
 
@@ -159,6 +172,7 @@ static void p9_disconnect(struct XenDevice *xendev)
 {
     struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
 
+    fprintf (stderr,"in disconn");  
     if (p9dev->bs) {
         p9dev->bs = NULL;
     }
@@ -167,26 +181,30 @@ static void p9_disconnect(struct XenDevice *xendev)
     if (p9dev->sring) {
        p9dev->sring = NULL;
     }
+      fprintf (stderr,"leavin\n");  
 }
 
 static int p9_free(struct XenDevice *xendev)
 {
     struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
-  
+
+    fprintf (stderr,"in free");  
     if (p9dev->sring) {
         p9_disconnect(xendev);
     }
 
     g_free(p9dev->params);
     qemu_bh_delete(p9dev->bh);
+    fprintf (stderr,"leavin\n");  
     return 0;
 }
 
 static void p9_event(struct XenDevice *xendev)
 {
     struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
-
+   fprintf (stderr,"in evt\n");  
     qemu_bh_schedule(p9dev->bh);
+    fprintf (stderr,"leavin\n");  
 }
 
 struct XenDevOps xen_p9_ops = {
