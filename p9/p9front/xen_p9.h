@@ -1,3 +1,4 @@
+
 /******************************************************************************
  * p9.h
  *
@@ -28,6 +29,9 @@
 
 #ifndef __XEN_PUBLIC_9P_H__
 #define __XEN_PUBLIC_9P_H__
+
+#include <xen/io/ring.h>
+#include <xen/grant_table.h>
 
 /*
  * Front->back notifications: When enqueuing a new request, sending a
@@ -229,8 +233,6 @@
  *       transition, if it has not already been performed, in addition to the
  *       work associated with entry into the current state.
  */
-#include <xen/interface/io/ring.h>
-#include <xen/interface/grant_table.h>
 
 /*
  * REQUEST CODES.
@@ -261,10 +263,10 @@ struct p9_request {
         uint32_t       offset;      /* where in the page to get the data */
         uint32_t       nrbytes;
 };
-
 /*
  * not to be confused with p9_req_t in 9p client.h
  */
+
 typedef struct p9_request p9_request_t;
 
 struct p9_response {
@@ -287,4 +289,3 @@ DEFINE_RING_TYPES(p9, struct p9_request, struct p9_response);
 
 
 #endif
-
