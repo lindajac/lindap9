@@ -2,14 +2,11 @@
  * The Xen 9p transport driver
  *
  *
- *  This is a prototype for a Xen 9p transport driver.  This file contains the 
- *  interface to the 9p client code.
+ *  This is a prototype for a Xen 9p transport driver.  This file 
+ *  contains the interface to the 9p client code.
  *
  *  Copyright (C) 2015 Linda Jacobson
  *
- * This is a block based transport driver based on the lguest block driver
- * code. 
- *  
  *  Copied with minor modifications from the virtio 9p transport driver
  *  Copyright (C) 2007, 2008 Eric Van Hensbergen, IBM Corporation
  *
@@ -58,6 +55,13 @@
 #include <linux/virtio_9p.h>
 #include "trans_common.h"
 #include "xen_9p_front.h"
+
+/* a single mutex to manage channel initialization and attachment */
+static DEFINE_MUTEX(xen_9p_lock);  // do these names have special meaning?
+static DECLARE_WAIT_QUEUE_HEAD(vp_wq);
+static atomic_t vp_pinned = ATOMIC_INIT(0);
+
+static struct list_head xen9p_chan_list;
 
 /* How many bytes left in this page. */
 static unsigned int rest_of_page(void *data)
@@ -693,27 +697,19 @@ static struct p9_trans_module p9_virtio_trans = {
 	.owner = THIS_MODULE,
 };
 
-/* The standard init function */
-static int __init p9_virtio_init(void)
+/* 
+ * Called by the standard init function to initialize 9p data
+*/
+void init_xen_9p ()
 {
 	INIT_LIST_HEAD(&xen9p_chan_list);
-
-	v9fs_register_trans(&p9_virtio_trans);
-	return register_virtio_driver(&p9_virtio_drv);
+	v9fs_register_trans(&p9_xen_trans);
 }
 
-static void __exit p9_virtio_cleanup(void)
+/*
+ * ditto for cleanup
+ */
+void cleanup_xen_9p()
 {
-	unregister_virtio_driver(&p9_virtio_drv);
-	v9fs_unregister_trans(&p9_virtio_trans);
+	v9fs_unregister_trans(&p9_xen_trans);
 }
-
-module_init(p9_virtio_init);
-module_exit(p9_virtio_cleanup);
-
-MODULE_DEVICE_TABLE(virtio, id_table);
-MODULE_AUTHOR("Eric Van Hensbergen <ericvh@gmail.com>");
-MODULE_DESCRIPTION("Virtio 9p Transport");
-MODULE_LICENSE("GPL");
-
-

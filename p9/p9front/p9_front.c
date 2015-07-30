@@ -1,14 +1,38 @@
-/*  Xenbus Code for p9 frontend
-    Copyright (C) 2015 Linda Jacobson
-    Copyright (C) 2015 XenSource Ltd
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
+/*
+ *   Code for handling communication between Xen 9p front and back ends
+ *
+ *   Copyright (C) 2015 Linda Jacobson
+ *   Copyright (C) 2015 XenSource Ltd
+ *  
+ *  based on xen_blkfront.c code the front end of the Xen block driver
+ *
+ *
+ *
+ * Copyright (c) 2003-2004, Keir Fraser & Steve Hand
+ * Modifications by Mark A. Williamson are (c) Intel Research Cambridge
+ * Copyright (c) 2004, Christian Limpach
+ * Copyright (c) 2004, Andrew Warfield
+ * Copyright (c) 2005, Christopher Clark
+ * Copyright (c) 2005, XenSource Ltd
+ ** blkfront.c
+ *
+ * XenLinux virtual block device driver.
+ *
+ * Copyright (c) 2003-2004, Keir Fraser & Steve Hand
+ * Modifications by Mark A. Williamson are (c) Intel Research Cambridge
+ * Copyright (c) 2004, Christian Limpach
+ * Copyright (c) 2004, Andrew Warfield
+ * Copyright (c) 2005, Christopher Clark
+ * Copyright (c) 2005, XenSource Ltd
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
 */
 
 #include <linux/interrupt.h>
@@ -34,33 +58,12 @@
 
 #include <asm/xen/hypervisor.h>
 #include "p9.h"
+#include "xen_9p_front.h"
 
 #define GRANT_INVALID_REF 0
 
 
-struct grant {
-    grant_ref_t gref;
-    unsigned long pfn;
-    struct list_head node;
-};
-
 static DEFINE_MUTEX(p9front_mutex);
-
-struct p9_front_info {
-	spinlock_t            io_lock;
-	struct mutex          mutex;
-	struct xenbus_device *xbdev;
-	enum p9_state         connected;
-	int                   ring_ref;
-	struct p9_front_ring  ring;
-        unsigned int          evtchn;
-        unsigned int          irq;
-	struct list_head      grants;
-        char                 *page;
-        p9_request_t          past_requests[10];  // magic # for now
-	int is_ready;
-};
-
 
 static struct grant *get_grant(unsigned long pfn,
                                struct p9_front_info *info)
@@ -86,7 +89,10 @@ printk (KERN_INFO "exiting get_grant error ENOMEM\n");
  return (void *) -ENOMEM;
 }
 
-static void p9_free(struct p9_front_info *info, int suspend)
+/*
+ * called whenever it's necessary to free up resources:  suspend/resume, exiting
+ */
+void p9_free(struct p9_front_info *info, int suspend)
 {
   printk (KERN_INFO "free");
 	/* Prevent new requests being issued until we fix things up. */
@@ -169,15 +175,13 @@ static irqreturn_t p9_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static int p9front_is_ready (struct xenbus_device *dev)
-{
-    struct p9_front_info *info; 
- printk (KERN_INFO "isready");
-    info  = dev_get_drvdata (&dev->dev);
- printk (KERN_INFO "exiting\n");
-  return info->is_ready;
-}  
-
+/*
+ * setup_9p_ring - call RING macros to initalize xen ring
+ *
+ * @dev - the device information
+ * @info - the per instance info
+ *
+ */  
 static int setup_9p_ring(struct xenbus_device *dev,
 			 struct p9_front_info *info)
 {
@@ -219,7 +223,7 @@ fail:
 }
 
 /* Common code used when first setting up, and when resuming. */
-static int talk_to_9p_back(struct xenbus_device *dev,
+ int talk_to_9p_back(struct xenbus_device *dev,
 			   struct p9_front_info *info)
 {
 	const char *message = NULL;
@@ -274,51 +278,7 @@ again:
 	return err;
 }
 
-/**
- * Entry point to this code when ???.  Allocate the basic
- * structures and the ring buffer for communication with the backend, and
- * inform the backend of the appropriate details for those.  Switch to
- * Initialised state.
- */
-static int p9front_probe(struct xenbus_device *dev,
-			  const struct xenbus_device_id *id)
-{
-      struct p9_front_info *info;
-      int  err;
- 
-      info = kzalloc (sizeof (*info), GFP_KERNEL);
-      if (!info) {
-	xenbus_dev_fatal (dev, -ENOMEM, "allocating info struct");
-	return -ENOMEM;
-      }
-      spin_lock_init(&info->io_lock);
-      info->xbdev = dev;
-      info->connected = P9_STATE_DISCONNECTED;
-	/* Front end dir is a number, which is used as the id. */
-      dev_set_drvdata(&dev->dev, info);
-      
-      err = talk_to_9p_back (dev,info);
-      if (err) {
-	kfree (info);
-	dev_set_drvdata (&dev->dev, NULL);
-	 printk (KERN_INFO "exiting err\n");
-	return (err);
-      }
-      return 0;
-}
-
-/**
- * We are reconnecting to the backend, due to a suspend/resume, or a backend
- * driver restart.  Not sure what p9 needs to do yet
- */
-static int p9front_resume(struct xenbus_device *dev)
-{
-  printk (KERN_INFO "resume");	
-	return 0;
-}
-
-static void
-p9front_closing(struct p9_front_info *info)
+void p9front_closing(struct p9_front_info *info)
 {
 	struct xenbus_device *xbdev = info->xbdev;
   printk (KERN_INFO "closing");
@@ -333,7 +293,7 @@ const char *tstrs[] = {"s 1", "s 2", "s 3", "s4", "s5\n", "s6", "s 7", "s 8", "s
 /*
  * Invoked when the backend is finally 'ready' 
  */
-static void p9front_connect(struct p9_front_info *info)
+void p9front_connect(struct p9_front_info *info)
 {
         struct page  *apage;
 	char         *addr;
@@ -410,80 +370,3 @@ static void p9front_connect(struct p9_front_info *info)
 	return;
 }
 
-/**
- * Callback received when the backend's state changes.
- */
-static void p9back_changed(struct xenbus_device *dev,
-			    enum xenbus_state backend_state)
-{
-	struct p9_front_info *info = dev_get_drvdata(&dev->dev);
-
-  printk (KERN_INFO "back_changed");
-	dev_dbg(&dev->dev, "p9front:p9back_changed to state %d.\n", backend_state);
-
-	switch (backend_state) {
-	case XenbusStateInitialising:
-	case XenbusStateInitWait:
-	case XenbusStateInitialised:
-	case XenbusStateReconfiguring:
-	case XenbusStateReconfigured:
-	case XenbusStateUnknown:
-		break;
-
-	case XenbusStateConnected:
-		p9front_connect(info);
-		break;
-
-	case XenbusStateClosed:
-		if (dev->state == XenbusStateClosed)
-			break;
-		/* Missed the backend's Closing state -- fallthrough */
-	case XenbusStateClosing:
-		p9front_closing(info);
-		break;
-	}
- printk (KERN_INFO "exiting\n");
-}
-
-static int p9front_remove(struct xenbus_device *xbdev)
-{
-	struct p9_front_info *info = dev_get_drvdata(&xbdev->dev);
-
-  printk (KERN_INFO "remove");
-        dev_dbg(&xbdev->dev, "%s removed", xbdev->nodename);
-
-	p9_free(info, 0);
-
-	info->xbdev = NULL;
-	kfree(info);
-	 printk (KERN_INFO "exiting\n");
-	return 0;
-}
-
-static int __init xlp9_init(void)
-{
-	int ret = 0;
-  printk (KERN_INFO "\n\n in p9_init\n");
-        p9front_driver.driver.name = "p9";
-	p9front_driver.driver.owner = THIS_MODULE;
-	ret = xenbus_register_frontend(&p9front_driver);
- printk (KERN_INFO "exiting p9_init\n");
-	return ret;
-}
-module_init(xlp9_init);
-
-
-static void __exit xlp9_exit(void)
-{
-    printk (KERN_INFO "exit");
-	xenbus_unregister_driver(&p9front_driver);
-	 printk (KERN_INFO "exiting\n");
-//	kfree(minors);
-}
-module_exit(xlp9_exit);
-
-MODULE_DESCRIPTION("Xen virtual 9P frontend");
-MODULE_LICENSE("GPL");
-MODULE_ALIAS("xen:p9");
-MODULE_ALIAS("xenp9");
-MODULE_AUTHOR("Linda Jacobson");
