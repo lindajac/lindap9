@@ -2,8 +2,10 @@
  * The Xen 9p transport driver
  *
  *
- *  This is a prototype for a Xen 9p transport driver.  This file contains the 
- *  interface to the 9p client code.
+ *  This is a prototype for a Xen 9p transport driver. 
+ *   This file contains the driver portions of the code.  The Xen interface
+ *  is in the file p9_front.c; the interface to the 9p client is in 
+ *  trans_xen9p.c
  *
  *  Copyright (C) 2015 Linda Jacobson
  *
