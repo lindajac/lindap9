@@ -2,7 +2,7 @@
  * The Xen 9p transport driver
  *
  *
- *  This is a prototype for a Xen 9p transport driver.  This file 
+ *  This is a prototype for a Xen 9p transport driver.  This file
  *  contains the interface to the 9p client code.
  *
  *  Copyright (C) 2015 Linda Jacobson
@@ -51,23 +51,22 @@
 #include <net/9p/transport.h>
 #include <linux/scatterlist.h>
 #include <linux/swap.h>
-#include <linux/virtio.h>
-#include <linux/virtio_9p.h>
 #include "trans_common.h"
+#include "p9.h"
 #include "xen_9p_front.h"
 
 /* a single mutex to manage channel initialization and attachment */
-static DEFINE_MUTEX(xen_9p_lock);  // do these names have special meaning?
-static DECLARE_WAIT_QUEUE_HEAD(vp_wq);
-static atomic_t vp_pinned = ATOMIC_INIT(0);
+static DEFINE_MUTEX(xen_9p_lock);	// do these names have special meaning?
+// static DECLARE_WAIT_QUEUE_HEAD(vp_wq); //do I need this?
+//static atomic_t vp_pinned = ATOMIC_INIT(0); //don't think I need this.
 
 static struct list_head xen9p_chan_list;
 
 /* How many bytes left in this page. */
-static unsigned int rest_of_page(void *data)
+/*static unsigned int rest_of_page(void *data)
 {
-	return PAGE_SIZE - ((unsigned long)data % PAGE_SIZE);
-}
+	return PAGE_SIZE - ((unsigned long) data % PAGE_SIZE);
+	}*/
 
 /**
  * p9_xen_close - reclaim resources of a channel
@@ -76,10 +75,11 @@ static unsigned int rest_of_page(void *data)
  * This reclaims a channel by freeing its resources and
  * reseting its inuse flag.
  * actually at the moment - no resources are freed - lrj
+ * called in client.c and p9_front_driver.c
  *
  */
 
-static void p9_xen_close(struct p9_client *client)
+void p9_xen_close(struct p9_client *client)
 {
 	struct xen9p_chan *chan = client->trans;
 
@@ -90,54 +90,33 @@ static void p9_xen_close(struct p9_client *client)
 }
 
 /**
- * req_done - callback which signals activity from the server
- * @vq: virtio queue activity was received on
- *
- * In virtio:  This notifies us that the server has triggered some activity
- * on the virtio channel - most likely a response to request we
- * sent.  Figure out which requests now have responses and wake up
- * those threads.
- * For xen, it will be called as a function when front end receives a response
- *  OR - this is what I'm replacing with xen mgmt  
- *
- * Bugs: could do with some additional sanity checking, but appears to work.
+ * req_done - called by handle response when server has completed request
+ * @metadata: pointer to a buffer containing:
+ *            the original fcall struct
+ *            any data sent to the server
+ *            any data sent fromt the server - in that order 
  *
  */
 
-static void req_done(struct virtqueue *vq)
+void req_done(void *metadata, struct xen9p_chan *chan, int16_t status)
 {
-	struct xen9p_chan *chan = vq->vdev->priv;
 	struct p9_fcall *rc;
-	unsigned int len;
+	unsigned int offset;
 	struct p9_req_t *req;
-	unsigned long flags;
 
-	p9_debug(P9_DEBUG_TRANS, ": request done\n");
-
-	while (1) {
-		spin_lock_irqsave(&chan->lock, flags);
-		rc = virtqueue_get_buf(chan->vq, &len);
-		if (rc == NULL) {
-			spin_unlock_irqrestore(&chan->lock, flags);
-			break;
-		}
-		chan->ring_bufs_avail = 1;
-		spin_unlock_irqrestore(&chan->lock, flags);
-		/* Wakeup if anyone waiting for VirtIO ring space. */
-		wake_up(chan->vc_wq);
-		p9_debug(P9_DEBUG_TRANS, ": rc %p\n", rc);
-		p9_debug(P9_DEBUG_TRANS, ": lookup tag %d\n", rc->tag);
-		/*
-                 *  calls functions in client.c that match requests to responses
-		 *  and wake up the waiting requester
-		 */
-		req = p9_tag_lookup(chan->client, rc->tag);
-		req->status = REQ_STATUS_RCVD;
-		p9_client_cb(chan->client, req);
-	}
+	printk("request done\n");
+	memcpy (rc, (struct p9_fcall *) metadata, sizeof (struct p9_fcall));
+	/*
+	 *  calls functions in client.c that match requests to responses
+	 *  and wake up the waiting requester
+	 */
+	req = p9_tag_lookup(chan->client, rc->tag);
+	offset = sizeof(struct p9_fcall) + req->tc->size;
+	memcpy (req->rc->sdata, metadata+offset, req->rc->size);
+	p9_client_cb(chan->client, req,  REQ_STATUS_RCVD);
 }
 
-/**
+/**pack_sg_list_p
  * pack_sg_list - pack a scatter gather list from a linear buffer
  * @sg: scatter/gather list to pack into
  * @start: which segment of the sg_list to start at
@@ -151,120 +130,60 @@ static void req_done(struct virtqueue *vq)
  *
  */
 
-static int pack_sg_list(struct scatterlist *sg, int start,
-			int limit, char *data, int count)
-{
-	int s;
-	int index = start;
-
-	while (count) {
-		s = rest_of_page(data);
-		if (s > count)
-			s = count;
-		BUG_ON(index > limit);
-		/* Make sure we don't terminate early. */
-		sg_unmark_end(&sg[index]);
-		sg_set_buf(&sg[index++], data, s);
-		count -= s;
-		data += s;
-	}
-	if (index-start)
-		sg_mark_end(&sg[index - 1]);
-	return index-start;
-}
-
-/* We don't currently allow canceling of virtio requests */
-static int p9_virtio_cancel(struct p9_client *client, struct p9_req_t *req)
-{
-	return 1;
-}
 
 /**
- * pack_sg_list_p - Just like pack_sg_list. Instead of taking a buffer,
- * this takes a list of pages.
- * @sg: scatter/gather list to pack into
- * @start: which segment of the sg_list to start at
- * @pdata: a list of pages to add into sg.
- * @nr_pages: number of pages to pack into the scatter/gather list
- * @data: data to pack into scatter/gather list
- * @count: amount of data to pack into the scatter/gather list
- */
-static int
-pack_sg_list_p(struct scatterlist *sg, int start, int limit,
-	       struct page **pdata, int nr_pages, char *data, int count)
-{
-	int i = 0, s;
-	int data_off;
-	int index = start;
-
-	BUG_ON(nr_pages > (limit - start));
-	/*
-	 * if the first page doesn't start at
-	 * page boundary find the offset
-	 */
-	data_off = offset_in_page(data);
-	while (nr_pages) {
-		s = rest_of_page(data);
-		if (s > count)
-			s = count;
-		/* Make sure we don't terminate early. */
-		sg_unmark_end(&sg[index]);
-		sg_set_page(&sg[index++], pdata[i++], s, data_off);
-		data_off = 0;
-		data += s;
-		count -= s;
-		nr_pages--;
-	}
-
-	if (index-start)
-		sg_mark_end(&sg[index - 1]);
-	return index - start;
-}
-
-/**
- * p9_xen_request - issue a request: 
- *               prepare sg list - then use xen code to send request
+ * p9_xen_request - issue a request: use xen code to send request
+ *               no sg list for now
  * @client: client instance issuing the request
  * @req: request to be issued
  *
  */
 
-static int
-p9_xen_request(struct p9_client *client, struct p9_req_t *req)
+static int p9_xen_request(struct p9_client *client, struct p9_req_t *req)
 {
 	int err;
-	int in, out, out_sgs, in_sgs;
-	unsigned long flags;
+	//	int in, out, out_sgs, in_sgs;
+	int out_len, in_len;
+	// unsigned long flags;
 	struct xen9p_chan *chan = client->trans;
-	struct scatterlist *sgs[2];
+	//	struct scatterlist *sgs[2];
 
 	p9_debug(P9_DEBUG_TRANS, "9p debug: virtio request\n");
 
 	req->status = REQ_STATUS_SENT;
-req_retry:
+	out_len = req->tc->size;
+	in_len  = req->tc->capacity - out_len;
+	err = p9front_handle_client_request (chan->drv_info,
+					     req->tc, sizeof (struct p9_fcall),
+					     req->tc->sdata, out_len,
+					     req->rc->sdata, in_len);
+	/* - no scatter gather or queues for now*/
+	
+   /*      req_retry:
 	spin_lock_irqsave(&chan->lock, flags);
 
-	out_sgs = in_sgs = 0;
-	/* Handle out VirtIO ring buffers */
+		out_sgs = in_sgs = 0;
+			
 	out = pack_sg_list(chan->sg, 0,
 			   NUM_P9_SGLISTS, req->tc->sdata, req->tc->size);
 	if (out)
 		sgs[out_sgs++] = chan->sg;
 
 	in = pack_sg_list(chan->sg, out,
-			  NUM_P9_SGLISTS, req->rc->sdata, req->rc->capacity);
+			  NUM_P9_SGLISTS, req->rc->sdata,
+			  req->rc->capacity);
 	if (in)
 		sgs[out_sgs + in_sgs++] = chan->sg + out;
 
-	err = virtqueue_add_sgs(chan->vq, sgs, out_sgs, in_sgs, req->tc,
-				GFP_ATOMIC);
+	
 	if (err < 0) {
 		if (err == -ENOSPC) {
 			chan->ring_bufs_avail = 0;
 			spin_unlock_irqrestore(&chan->lock, flags);
 			err = wait_event_interruptible(*chan->vc_wq,
-							chan->ring_bufs_avail);
-			if (err  == -ERESTARTSYS)
+						       chan->
+						       ring_bufs_avail);
+			if (err == -ERESTARTSYS)
 				return err;
 
 			p9_debug(P9_DEBUG_TRANS, "Retry virtio request\n");
@@ -279,47 +198,11 @@ req_retry:
 	virtqueue_kick(chan->vq);
 	spin_unlock_irqrestore(&chan->lock, flags);
 
-	p9_debug(P9_DEBUG_TRANS, "virtio request kicked\n");
+	p9_debug(P9_DEBUG_TRANS, "virtio request kicked\n");*/
+	
 	return 0;
 }
 
-/*
- * p9_get_mapped_pages - used for zero copy requests, so ignored for now
- */
-static int p9_get_mapped_pages(struct xen9p_chan *chan,
-			       struct page **pages, char *data,
-			       int nr_pages, int write, int kern_buf)
-{
-	int err;
-	if (!kern_buf) {
-		/*
-		 * We allow only p9_max_pages pinned. We wait for the
-		 * Other zc request to finish here
-		 */
-		if (atomic_read(&vp_pinned) >= chan->p9_max_pages) {
-			err = wait_event_interruptible(vp_wq,
-			      (atomic_read(&vp_pinned) < chan->p9_max_pages));
-			if (err == -ERESTARTSYS)
-				return err;
-		}
-		err = p9_payload_gup(data, &nr_pages, pages, write);
-		if (err < 0)
-			return err;
-		atomic_add(nr_pages, &vp_pinned);
-	} else {
-		/* kernel buffer, no need to pin pages */
-		int s, index = 0;
-		int count = nr_pages;
-		while (nr_pages) {
-			s = rest_of_page(data);
-			pages[index++] = kmap_to_page(data);
-			data += s;
-			nr_pages--;
-		}
-		nr_pages = count;
-	}
-	return nr_pages;
-}
 
 /**
  * p9_xen_zc_request - issue a zero copy request
@@ -334,18 +217,20 @@ static int p9_get_mapped_pages(struct xen9p_chan *chan,
  */
 static int
 p9_xen_zc_request(struct p9_client *client, struct p9_req_t *req,
-		     char *uidata, char *uodata, int inlen,
-		     int outlen, int in_hdr_len, int kern_buf)
+		  char *uidata, char *uodata, int inlen,
+		  int outlen, int in_hdr_len, int kern_buf)
 {
-	int in, out, err, out_sgs, in_sgs;
+  /*  	int in, out, err, out_sgs, in_sgs;
 	unsigned long flags;
 	int in_nr_pages = 0, out_nr_pages = 0;
 	struct page **in_pages = NULL, **out_pages = NULL;
 	struct xen9p_chan *chan = client->trans;
-	struct scatterlist *sgs[4];
+	struct scatterlist *sgs[4];*/
 
-	p9_debug(P9_DEBUG_TRANS, "virtio request\n");
-
+	p9_debug(P9_DEBUG_TRANS, "xen 9p zcrequest\n");
+	p9_xen_request (client, req);
+	return 0;  // this is on purpose - not implementing at the moment
+	/*
 	if (uodata) {
 		out_nr_pages = p9_nr_pages(uodata, outlen);
 		out_pages = kmalloc(sizeof(struct page *) * out_nr_pages,
@@ -355,7 +240,8 @@ p9_xen_zc_request(struct p9_client *client, struct p9_req_t *req,
 			goto err_out;
 		}
 		out_nr_pages = p9_get_mapped_pages(chan, out_pages, uodata,
-						   out_nr_pages, 0, kern_buf);
+						   out_nr_pages, 0,
+						   kern_buf);
 		if (out_nr_pages < 0) {
 			err = out_nr_pages;
 			kfree(out_pages);
@@ -372,7 +258,8 @@ p9_xen_zc_request(struct p9_client *client, struct p9_req_t *req,
 			goto err_out;
 		}
 		in_nr_pages = p9_get_mapped_pages(chan, in_pages, uidata,
-						  in_nr_pages, 1, kern_buf);
+						  in_nr_pages, 1,
+						  kern_buf);
 		if (in_nr_pages < 0) {
 			err = in_nr_pages;
 			kfree(in_pages);
@@ -381,12 +268,11 @@ p9_xen_zc_request(struct p9_client *client, struct p9_req_t *req,
 		}
 	}
 	req->status = REQ_STATUS_SENT;
-req_retry_pinned:
+ req_retry_pinned:
 	spin_lock_irqsave(&chan->lock, flags);
 
 	out_sgs = in_sgs = 0;
 
-	/* out data */
 	out = pack_sg_list(chan->sg, 0,
 			   NUM_P9_SGLISTS, req->tc->sdata, req->tc->size);
 
@@ -396,9 +282,10 @@ req_retry_pinned:
 	if (out_pages) {
 		sgs[out_sgs++] = chan->sg + out;
 		out += pack_sg_list_p(chan->sg, out, NUM_P9_SGLISTS,
-				      out_pages, out_nr_pages, uodata, outlen);
+				      out_pages, out_nr_pages, uodata,
+				      outlen);
 	}
-		
+	*/
 	/*
 	 * Take care of in data
 	 * For example TREAD have 11.
@@ -406,7 +293,7 @@ req_retry_pinned:
 	 * Arrange in such a way that server places header in the
 	 * alloced memory and payload onto the user buffer.
 	 */
-	in = pack_sg_list(chan->sg, out,
+	/*	in = pack_sg_list(chan->sg, out,
 			  NUM_P9_SGLISTS, req->rc->sdata, in_hdr_len);
 	if (in)
 		sgs[out_sgs + in_sgs++] = chan->sg + out;
@@ -425,8 +312,9 @@ req_retry_pinned:
 			chan->ring_bufs_avail = 0;
 			spin_unlock_irqrestore(&chan->lock, flags);
 			err = wait_event_interruptible(*chan->vc_wq,
-						       chan->ring_bufs_avail);
-			if (err  == -ERESTARTSYS)
+						       chan->
+						       ring_bufs_avail);
+			if (err == -ERESTARTSYS)
 				goto err_out;
 
 			p9_debug(P9_DEBUG_TRANS, "Retry virtio request\n");
@@ -444,10 +332,10 @@ req_retry_pinned:
 	p9_debug(P9_DEBUG_TRANS, "virtio request kicked\n");
 	err = wait_event_interruptible(*req->wq,
 				       req->status >= REQ_STATUS_RCVD);
-	/*
+	
 	 * Non kernel buffers are pinned, unpin them
-	 */
-err_out:
+	 
+	      err_out:
 	if (!kern_buf) {
 		if (in_pages) {
 			p9_release_pages(in_pages, in_nr_pages);
@@ -457,127 +345,26 @@ err_out:
 			p9_release_pages(out_pages, out_nr_pages);
 			atomic_sub(out_nr_pages, &vp_pinned);
 		}
-		/* wakeup anybody waiting for slots to pin pages */
-		wake_up(&vp_wq);
+		 wakeup anybody waiting for slots to pin pages 
+			wake_up(&vp_wq);
 	}
 	kfree(in_pages);
 	kfree(out_pages);
-	return err;
+	return err;*/
 }
-
-/*
- * this will need to be changed for xen - but not sure how
- */
-static ssize_t p9_mount_tag_show(struct device *dev,
-				struct device_attribute *attr, char *buf)
-{
-	struct xen9p_chan *chan;
-	struct virtio_device *vdev;
-
-	vdev = dev_to_virtio(dev);
-	chan = vdev->priv;
-
-	return snprintf(buf, chan->tag_len + 1, "%s", chan->tag);
-}
-
-static DEVICE_ATTR(mount_tag, 0444, p9_mount_tag_show, NULL);
 
 /**
- * p9_xen_probe - probe for existence of 9P channels
- *                initialize 9p "device"
- *                needs to be merged with probe in p9_front.c (which has correct params
- * @vdev: device to probe
- *
- * This probes for existing channels.
- *
- */
-
-static int p9_xen_probe(struct virtio_device *vdev)
-{
-	__u16 tag_len;
-	char *tag;
-	int err;
-	struct xen9p_chan *chan;
-
-	chan = kmalloc(sizeof(struct xen9p_chan), GFP_KERNEL);
-	if (!chan) {
-		pr_err("Failed to allocate virtio 9P channel\n");
-		err = -ENOMEM;
-		goto fail;
-	}
-
-	chan->vdev = vdev;
-
-	/* We expect one virtqueue, for requests. */
-	chan->vq = virtio_find_single_vq(vdev, req_done, "requests");
-	if (IS_ERR(chan->vq)) {
-		err = PTR_ERR(chan->vq);
-		goto out_free_vq;
-	}
-	chan->vq->vdev->priv = chan;
-	spin_lock_init(&chan->lock);
-
-	sg_init_table(chan->sg, NUM_P9_SGLISTS);
-
-	chan->inuse = false;
-	if (virtio_has_feature(vdev, VIRTIO_9P_MOUNT_TAG)) {
-		vdev->config->get(vdev,
-				offsetof(struct virtio_9p_config, tag_len),
-				&tag_len, sizeof(tag_len));
-	} else {
-		err = -EINVAL;
-		goto out_free_vq;
-	}
-	tag = kmalloc(tag_len, GFP_KERNEL);
-	if (!tag) {
-		err = -ENOMEM;
-		goto out_free_vq;
-	}
-	vdev->config->get(vdev, offsetof(struct virtio_9p_config, tag),
-			tag, tag_len);
-	chan->tag = tag;
-	chan->tag_len = tag_len;
-
-	err = sysfs_create_file(&(vdev->dev.kobj), &dev_attr_mount_tag.attr);
-	if (err) {
-		goto out_free_tag;
-	}
-	chan->vc_wq = kmalloc(sizeof(wait_queue_head_t), GFP_KERNEL);
-	if (!chan->vc_wq) {
-		err = -ENOMEM;
-		goto out_free_tag;
-	}
-	init_waitqueue_head(chan->vc_wq);
-
-	/* Ceiling limit to avoid denial of service attacks */
-	chan->p9_max_pages = nr_free_buffer_pages()/4;
-
-	mutex_lock(&xen_9p_lock);
-	list_add_tail(&chan->chan_list, &xen9p_chan_list);
-	mutex_unlock(&xen_9p_lock);
-	return 0;
-
-out_free_tag:
-	kfree(tag);
-out_free_vq:
-	vdev->config->del_vqs(vdev);
-	kfree(chan);
-fail:
-	return err;
-}
-
-
-/**
- * p9_xen_create - initialize the transport; virtio uses a channel model
+ * p9_xen_create - initialize the transport; virtio uses a channel model, which
+ *                 I'm copying
  * @client: client instance invoking this transport
- * @devname: string identifying the channel to connect to (unused)
- * @args: args passed from sys_mount() for per-transport options (unused)
+ * @devname: string identifying the channel to connect to 
+ * @args: args passed from sys_mount() for per-transport options (unused in this
+ *        func - client.c has already parsed them, and stored relevant info in 
+ *        p9_client struct
  *
- * This sets up a transport channel for 9p communication.  Right now
- * we only match the first available channel, but eventually we couldlook up
- * alternate channels by matching devname versus a virtio_config entry.
- * We use a simple reference count mechanism to ensure that only a single
- * mount has a channel open at a time.
+ * This sets up a transport channel for 9p communication. 
+ * Match the first available channel, using a simple reference count mechanism to ensure
+ * that only a single mount has a channel open at a time.
  *
  */
 
@@ -585,101 +372,45 @@ static int
 p9_xen_create(struct p9_client *client, const char *devname, char *args)
 {
 	struct xen9p_chan *chan;
-	int ret = -ENOENT;
+	int ret = 0;
 	int found = 0;
 
 	mutex_lock(&xen_9p_lock);
 	list_for_each_entry(chan, &xen9p_chan_list, chan_list) {
-		if (!strncmp(devname, chan->tag, chan->tag_len) &&
-		    strlen(devname) == chan->tag_len) {
+	  if (!strncmp(devname, chan->tag, chan->tag_len) &&
+	      strlen(devname) == chan->tag_len) {
 			if (!chan->inuse) {
 				chan->inuse = true;
 				found = 1;
 				break;
 			}
 			ret = -EBUSY;
+			goto out;
 		}
 	}
 	mutex_unlock(&xen_9p_lock);
 
 	if (!found) {
 		pr_err("no channels available\n");
-		return ret;
+		ret = ENOENT;	
+	} else {
+		client->trans = (void *) chan;
+		client->status = Connected;
+		chan->client = client;
 	}
-
-	client->trans = (void *)chan;
-	client->status = Connected;
-	chan->client = client;
-
-	return 0;
+ out:	
+	return ret;
 }
-
-/**
- * p9_xen_remove - clean up resources associated with "device"
- * @vdev: virtio device to remove
- *
- */
-
-static void p9_xen_remove(struct virtio_device *vdev)
-{
-	struct xen9p_chan *chan = vdev->priv;
-
-	if (chan->inuse)
-		p9_virtio_close(chan->client);
-	vdev->config->del_vqs(vdev);
-
-	mutex_lock(&xen_9p_lock);
-	list_del(&chan->chan_list);
-	mutex_unlock(&xen_9p_lock);
-	sysfs_remove_file(&(vdev->dev.kobj), &dev_attr_mount_tag.attr);
-	kfree(chan->tag);
-
-	kfree(chan->vc_wq);
-	kfree(chan);
-
-}
-
-static struct virtio_device_id id_table[] = {
-	{ VIRTIO_ID_9P, VIRTIO_DEV_ANY_ID },
-	{ 0 },
-};
-
-static unsigned int features[] = {
-	VIRTIO_9P_MOUNT_TAG,
-};
 
 /*
- * The standard "struct lguest_driver": 
- * change to merge w/ p9_front.c
+ * not handling cancels at the moment
  */
-/*static struct virtio_driver p9_virtio_drv = {
-	.feature_table  = features,
-	.feature_table_size = ARRAY_SIZE(features),
-	.driver.name    = KBUILD_MODNAME,                   ?????DO I need this????
-	.driver.owner	= THIS_MODULE,
-	.id_table	= id_table,
-	.probe		= p9_virtio_probe,
-	.remove		= p9_virtio_remove,
-	};*/
+static int p9_xen_cancel (struct p9_client *client, struct p9_req_t *req)
+{
+	return 1;
+}
 
-
-
-static const struct xenbus_device_id p9front_ids[] = {
-	{ "p9" },
-	{ "" }
-};
-
-static struct xenbus_driver p9front_driver = {
-        .ids = p9front_ids,
-	.probe = p9front_probe,
-	.remove = p9front_remove,
-	.resume = p9front_resume,
-	.otherend_changed = p9back_changed,
-	.is_ready = p9front_is_ready,
-};
-
-
-static struct p9_trans_module p9_virtio_trans = {
+static struct p9_trans_module p9_xen_trans = {
 	.name = "xen",
 	.create = p9_xen_create,
 	.close = p9_xen_close,
@@ -697,10 +428,10 @@ static struct p9_trans_module p9_virtio_trans = {
 	.owner = THIS_MODULE,
 };
 
-/* 
+/*
  * Called by the standard init function to initialize 9p data
 */
-void init_xen_9p ()
+void init_xen_9p(void)
 {
 	INIT_LIST_HEAD(&xen9p_chan_list);
 	v9fs_register_trans(&p9_xen_trans);
@@ -709,7 +440,7 @@ void init_xen_9p ()
 /*
  * ditto for cleanup
  */
-void cleanup_xen_9p()
+void cleanup_xen_9p(void)
 {
 	v9fs_unregister_trans(&p9_xen_trans);
 }
