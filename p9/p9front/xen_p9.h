@@ -258,7 +258,7 @@ struct p9_request_segment {
 
 struct p9_request {
         uint64_t       id;          /* I'm me */
-        uint8_t        operation;   
+        uint8_t        operation;
         grant_ref_t    gref;        /* reference to I/O buffer frame        */
         uint32_t       offset;      /* where in the page to get the data */
         uint32_t       nrbytes;
@@ -270,9 +270,9 @@ struct p9_request {
 typedef struct p9_request p9_request_t;
 
 struct p9_response {
-        uint64_t        id;              /* copied from request */
-        uint8_t         operation;       /* copied from request */
-        int16_t         status;          /* BLKIF_RSP_???       */
+        uint64_t       id;              /* copied from request */
+        uint8_t        operation;       /* copied from request */
+        int16_t        status;          /* BLKIF_RSP_???       */
 };
 
 typedef struct p9_response p9_response_t;

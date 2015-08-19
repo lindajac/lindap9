@@ -144,8 +144,9 @@ void p9front_closing(struct p9_front_info *info);
 void p9_handle_response(struct p9_response *bret,
 			struct p9_front_info *info);
 int p9front_handle_client_request (struct p9_front_info *info,
-				    void *req_metadata, int metadata_len,
+				    uint16_t tag,
 				    char *out_data, int out_len,
 				    char *in_data, int in_len);
-void req_done(void *metadata, struct xen9p_chan *chan, int16_t status);
+void req_done(void *metadata, struct xen9p_chan *chan, int16_t status,
+	      uint16_t tag);
 void p9_xen_close(struct p9_client *client);

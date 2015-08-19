@@ -16,7 +16,7 @@
 
 #include "hw/hw.h"
 #include "hw/xen/xen_backend.h"
-#include "p9.h"
+#include "xen_p9.h"
 
 
 /* ------------------------------------------------------------- */
@@ -29,37 +29,180 @@ static int max_requests = 2;
 #define BLOCK_SIZE  512
 #define P9_MAX_SEGMENTS_PER_REQUEST 1
 
+/*struct ioreq {
+    p9_request_t        req;
+    int16_t             status;
 
+ 
+    // grant mapping 
+    uint32_t            domids[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    uint32_t            refs[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    int                 prot;
+    void                *page[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    void                *pages;
+    int                 num_unmap;
+
+  
+    struct XenP9Dev    *p9dev;
+ 
+    };*/
 
 struct XenP9Dev {
     struct XenDevice    xendev;  /* must be first */
     char                *params;
     char                *mode;
-    char                *type;
 
     int                 ring_ref;
     void                *sring;
-    int                 *page;
-  
     p9_back_ring_t      ring;
-   
-    int                 cnt_map;
+    void                *page;
+    grant_ref_t         gref;  
+  
+    int                 more_work;
    
     unsigned int        max_grants;
 
-    /* qemu block driver */
-    DriveInfo           *dinfo;
-    BlockDriverState    *bs;
     QEMUBH              *bh;
 };
 
 /* ------------------------------------------------------------- */
 
+
+static int p9_send_response(struct XenP9Dev  *p9dev, p9_request_t *p9reqp)
+{
+    int               send_notify   = 0;
+    int               have_requests = 0;
+    p9_response_t     resp;
+    void              *dst;
+
+    resp.id        = p9reqp->id;
+    resp.operation = p9reqp->operation;
+    resp.status    = P9_RSP_OKAY;
+
+    dst = RING_GET_RESPONSE(&p9dev->ring, p9dev->ring.rsp_prod_pvt);
+    memcpy(dst, &resp, sizeof(resp));
+    p9dev->ring.rsp_prod_pvt++;
+
+    RING_PUSH_RESPONSES_AND_CHECK_NOTIFY(&p9dev->ring, send_notify);
+    if (p9dev->ring.rsp_prod_pvt == p9dev->ring.req_cons) {
+        /*
+         * Tail check for pending requests. Allows frontend to avoid
+         * notifications if requests are already in flight (lower
+         * overheads and promotes batching).
+         */
+        RING_FINAL_CHECK_FOR_REQUESTS(&p9dev->ring, have_requests);
+    } else if (RING_HAS_UNCONSUMED_REQUESTS(&p9dev->ring)) {
+        have_requests = 1;
+    }
+
+    if (have_requests) {
+        p9dev->more_work++;
+    }
+    return send_notify;
+}
+
+/*
+ * a bunch of strings to "read" based on # of bytes
+ */
+const char *sarray[] = {
+  "1", "22", "333", "4444", "5char", "6bytes", "7 bytes", "8 charac", "9 charact", "10 charact",};
+  
+
+/*
+ * parse request and do something with it
+ * right now the do something is to read and print a string if op is a read
+ * generate and return a string if op is a read
+ */
+static void p9_parse_request (struct XenP9Dev *p9dev, p9_request_t *p9reqp)
+{
+  char astring[1024];
+ 
+  /*
+   * for now, assume only read or write of strings
+   */
+  if (p9reqp->operation == P9_OP_READ) {
+    int i = p9reqp->nrbytes - 1;
+    memcpy (p9dev->page + p9reqp->offset, sarray[i], p9reqp->nrbytes);
+    fprintf (stderr, "read: %s", sarray[i]);
+  }
+  else {  // is write
+    memcpy (astring, p9dev->page + p9reqp->offset, p9reqp->nrbytes);
+    astring[p9reqp->nrbytes] = 0;
+    fprintf (stderr, "writing:  %s", astring);  
+  }
+}
+
+static void p9_handle_requests(struct XenP9Dev *p9dev)
+{
+    p9_request_t p9req;
+  
+
+    /*
+     * get a request from the ring buffer
+     */
+  
+    RING_IDX rc, rp;
+
+
+    p9dev->more_work = 0;
+
+    rc = p9dev->ring.req_cons;
+    rp = p9dev->ring.sring->req_prod;
+    xen_rmb(); /* Ensure we see queued requests up to 'rp'. */
+
+ 
+    //    p9_send_response_all(p9dev);  //not needed now
+    while (rc != rp) {
+        /* pull request from ring */
+        if (RING_REQUEST_CONS_OVERFLOW(&p9dev->ring, rc)) {
+            break;
+        }
+	//        p9_get_request(p9dev, &p9req, rc);
+	
+        memcpy(&p9req, RING_GET_REQUEST(&(p9dev->ring), rc), sizeof(p9req));
+        /*
+         *  update pointers
+         */
+        p9dev->ring.req_cons = ++rc;
+	/*
+         *  for now, this is always the same, but it's easier to redo this
+         *  than test for this being the first request
+         */
+	p9dev->gref = p9req.gref;
+        fprintf (stderr, "gref is %u",p9dev->gref);    
+        p9dev->page  = xc_gnttab_map_grant_ref(p9dev->xendev.gnttabdev,
+					   p9dev->xendev.dom,
+                                           p9dev->gref,
+                                           PROT_READ | PROT_WRITE);
+        if (!(p9dev->page)) {
+           fprintf (stderr,"leavin error2\n");       
+           return;
+        }
+
+        /*
+         * parse request and do something with it
+         */
+        p9_parse_request(p9dev, &p9req);
+        if (p9_send_response(p9dev, &p9req)) {
+            xen_be_send_notify(&p9dev->xendev);
+        }
+    }
+
+    /*
+     * repeat if more requests
+     */
+    if (p9dev->more_work) {
+        qemu_bh_schedule(p9dev->bh);
+    }
+    fprintf (stderr, "leaving handle_requests\n");
+}
+
 static void p9_bh(void *opaque)
 {
-  //    struct XenP9Dev *p9dev = opaque;
-    //    p9_handle_requests(p9dev);
-  printf ("in p9_bh - should I even be here/n");
+      struct XenP9Dev *p9dev = opaque;
+  printf ("in p9_bh");
+      p9_handle_requests(p9dev);
+  printf ("leaving in p9_bh/n");
 }
 
 /*
@@ -104,29 +247,11 @@ static int p9_init(struct XenDevice *xendev)
 static void p9_connect(struct XenDevice *xendev)
 {
   // struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
-    grant_ref_t gref;
-    int *page;
-    
-    // for now
-   void *pgref = &gref;
-
-     fprintf (stderr,"in p9_connect\n");  
-   if (xenstore_read_fe_int(xendev, "gref",
-			       (int *)pgref) == -1) {
-       fprintf (stderr,"leavin error\n");  
-        return;
-    }
-   fprintf (stderr, "gref is %u",gref);    
-   page  = xc_gnttab_map_grant_ref(xendev->gnttabdev,
-					   xendev->dom,
-                                           gref,
-                                           PROT_READ | PROT_WRITE);
-    if (!page) {
-       fprintf (stderr,"leavin error2\n");       
-        return;
-    }
-    fprintf (stderr,"I read %d\n", page[0]);
-    fprintf (stderr, "leaving now\n");
+  
+  
+   fprintf (stderr,"in p9_connect\n");  
+  
+   fprintf (stderr, "leaving now\n");
 }
 
 /*
@@ -164,7 +289,8 @@ static int p9_initwfe(struct XenDevice *xendev)
     xen_be_printf(&p9dev->xendev, 1, "ok: ring-ref %d, "
                    "remote port %d, local port %d\n",
                    p9dev->ring_ref,  p9dev->xendev.remote_port, p9dev->xendev.local_port);
-    fprintf (stderr,"leavin:  ring_ref %d, evt_chn %d local port? %d \n", p9dev->ring_ref,  p9dev->xendev.remote_port, p9dev->xendev.local_port);  
+    fprintf (stderr,"leavin:  ring_ref %d, evt_chn %d local port? %d \n", p9dev->ring_ref,
+	     p9dev->xendev.remote_port, p9dev->xendev.local_port);
     return 0;
 }
 
@@ -173,9 +299,7 @@ static void p9_disconnect(struct XenDevice *xendev)
     struct XenP9Dev *p9dev = container_of(xendev, struct XenP9Dev, xendev);
 
     fprintf (stderr,"in disconn");  
-    if (p9dev->bs) {
-        p9dev->bs = NULL;
-    }
+  
     xen_be_unbind_evtchn(&p9dev->xendev);
 
     if (p9dev->sring) {

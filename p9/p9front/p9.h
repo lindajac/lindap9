@@ -2,8 +2,8 @@
  * p9.h
  *
  * Unified 9p I/O interface for Xen guest OSes.  MANY COMMENTS BELOW ARE 
- * copied directly from blkif.h, since the state changes, etc. apply universally,
- * and they're a good explanation.
+ * copied directly from blkif.h, since the state changes, etc. 
+ * apply universally, and they're a good explanation.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to
@@ -26,8 +26,8 @@
  * Copyright (c) 2015 Linda Jacobson
  */
 
-#ifndef __XEN_PUBLIC_9P_H__
-#define __XEN_PUBLIC_9P_H__
+#ifndef __QEMU_XEN_P9_H__
+#define __QEMU_XEN_P9_H__
 
 /*
  * Front->back notifications: When enqueuing a new request, sending a
@@ -229,6 +229,8 @@
  *       transition, if it has not already been performed, in addition to the
  *       work associated with entry into the current state.
  */
+
+
 #include <xen/interface/io/ring.h>
 #include <xen/interface/grant_table.h>
 
@@ -253,13 +255,28 @@ struct p9_request_segment {
     uint32_t       nrbytes;     // number of bytes to transfer    
 };
 */
+/*
+ *  request for 9p transport front_end
+ *
+ *  @id  integer identifier
+ *  @gref reference to the I/O buffer frame
+ *  @offset offset in page where request starts
+ *  @nr_bytes total number of bytes allocated to this request's data
+ *  @metadata_len - number of bytes of information about the request
+ *  @out_len number of bytes of data being sent (may be 0)
+ *  @in_len  number of bytes of data that may be returned
+ *  @tag identifies the request to client on return
+ *  
+ */
 
 struct p9_request {
-        uint64_t       id;          /* I'm me */
-        uint8_t        operation;   
-        grant_ref_t    gref;        /* reference to I/O buffer frame        */
-        uint32_t       offset;      /* where in the page to get the data */
+        uint64_t       id;         
+        grant_ref_t    gref;        
+        uint32_t       offset;   
         uint32_t       nrbytes;
+        uint32_t       out_len;
+        uint32_t       in_len;
+        uint16_t       tag;  
 };
 
 /*
@@ -269,7 +286,7 @@ typedef struct p9_request p9_request_t;
 
 struct p9_response {
         uint64_t        id;              /* copied from request */
-        uint8_t         operation;       /* copied from request */
+        uint16_t        tag;             /*  ditto              */
         int16_t         status;          /* BLKIF_RSP_???       */
 };
 

@@ -47,18 +47,18 @@ struct grant {
 static DEFINE_MUTEX(p9front_mutex);
 
 struct p9_front_info {
-	spinlock_t io_lock;
-	struct mutex mutex;
+	spinlock_t            io_lock;
+	struct mutex          mutex;
 	struct xenbus_device *xbdev;
-	enum p9_state connected;
-	int ring_ref;
-	struct p9_front_ring ring;
-	unsigned int evtchn, irq;
-	struct list_head grants;
-        char             *page;
-        p9_request_t     past_requests[10];  // magic # for now
+	enum p9_state         connected;
+	int                   ring_ref;
+	struct p9_front_ring  ring;
+        unsigned int          evtchn;
+        unsigned int          irq;
+	struct list_head      grants;
+        char                 *page;
+        p9_request_t          past_requests[10];  // magic # for now
 	int is_ready;
-	int test_val;
 };
 
 
@@ -460,7 +460,6 @@ static int p9front_remove(struct xenbus_device *xbdev)
 	return 0;
 }
 
-
 static const struct xenbus_device_id p9front_ids[] = {
 	{ "p9" },
 	{ "" }
@@ -474,7 +473,6 @@ static struct xenbus_driver p9front_driver = {
 	.otherend_changed = p9back_changed,
 	.is_ready = p9front_is_ready,
 };
-
 
 static int __init xlp9_init(void)
 {

@@ -46,8 +46,7 @@ struct grant {
 
 static DEFINE_MUTEX(p9front_mutex);
 
-struct p9_front_info
-{
+struct p9_front_info {
 	spinlock_t io_lock;
 	struct mutex mutex;
 	struct xenbus_device *xbdev;
@@ -55,73 +54,44 @@ struct p9_front_info
 	int ring_ref;
 	struct p9_front_ring ring;
 	unsigned int evtchn, irq;
-	struct gnttab_free_callback callback;
 	struct list_head grants;
+        char             *page;
+        p9_request_t     past_requests[10];  // magic # for now
 	int is_ready;
 	int test_val;
 };
 
-int data_xfer [2048];
 
-/*static int fill_grant_buffer(struct p9_front_info *info)
-{
-       struct grant *gnt_list_entry;
-
-         printk (KERN_INFO "fillgrantbuffer");
-	 
-	gnt_list_entry = kzalloc(sizeof(struct grant), GFP_NOIO);
-	if (!gnt_list_entry)
-		goto out_of_memory;
-
-	gnt_list_entry->gref = GRANT_INVALID_REF;
-	list_add(&gnt_list_entry->node, &info->grants);
-  printk (KERN_INFO "exiting\n");
-	return 0;
-out_of_memory:
-        printk (KERN_INFO "exiting error ENOMEM\n");
-	return -ENOMEM;
-  
-	}*/
-
-
-static struct grant *get_grant(grant_ref_t *gref_head,
-                               unsigned long pfn,
+static struct grant *get_grant(unsigned long pfn,
                                struct p9_front_info *info)
 {
 	struct grant *gnt_list_entry;
 	unsigned long buffer_mfn;
 
-  printk (KERN_INFO "getgrant");
-        BUG_ON(list_empty(&info->grants));
-	/*	gnt_list_entry = list_first_entry(&info->grants, struct grant,
-	                                  node);
-	list_del(&gnt_list_entry->node);
+  printk (KERN_INFO "\nentered getgrant\n");
 
-	if (gnt_list_entry->gref != GRANT_INVALID_REF) {
- printk (KERN_INFO "exiting1\n");
-	  return gnt_list_entry;
-	  }*/
 	gnt_list_entry = kzalloc(sizeof(struct grant), GFP_NOIO);
 	if (!gnt_list_entry)
 		goto out_of_memory;
-
-	/* Assign a gref to this page */
-	gnt_list_entry->gref = gnttab_claim_grant_reference(gref_head);
-		BUG_ON(gnt_list_entry->gref == -ENOSPC);
+	printk ("to here");
+	
 	gnt_list_entry->pfn = pfn;
 
-	buffer_mfn = pfn_to_mfn(gnt_list_entry->pfn);
-	gnttab_grant_foreign_access_ref(gnt_list_entry->gref,
-	                                info->xbdev->otherend_id,
-	                                buffer_mfn, 0);
- printk (KERN_INFO "exiting normal\n");
+	buffer_mfn = pfn_to_mfn(pfn);
+	printk ("\nhere2 - mfn is %lu, otherid is %d\n", buffer_mfn,
+		info->xbdev->otherend_id);
+	/* Assign a gref to this page */
+	gnt_list_entry->gref =
+	  gnttab_grant_foreign_access(info->xbdev->otherend_id, buffer_mfn, 0);
+	
+printk ("gnt entry gref is %u; pfn is %lu\n",gnt_list_entry->gref, pfn);
+printk (KERN_INFO "exiting normal\n");
         return gnt_list_entry;
 	out_of_memory:
  printk (KERN_INFO "exiting error ENOMEM\n");
  ///FIX MEMEMEMME
-	return -ENOMEM;
+ return (void *) -ENOMEM;
 }
-
 
 static void p9_free(struct p9_front_info *info, int suspend)
 {
@@ -130,8 +100,6 @@ static void p9_free(struct p9_front_info *info, int suspend)
 	spin_lock_irq(&info->io_lock);
 	info->connected = suspend ?
 		P9_STATE_SUSPENDED : P9_STATE_DISCONNECTED;
-	/* No more gnttab callback work. */
-	gnttab_cancel_free_callback(&info->callback);
 	spin_unlock_irq(&info->io_lock);
 
 	/* Free resources associated with old device channel. */
@@ -147,6 +115,28 @@ static void p9_free(struct p9_front_info *info, int suspend)
  printk (KERN_INFO "exiting\n");
 }
 
+static void p9_handle_response (struct p9_response *bret, struct p9_front_info *info)
+{
+    unsigned long id;
+    p9_request_t *req_ptr;
+    int error;
+
+    id   = bret->id;
+    printk ("in handle_response; id is %lu\n", id);
+    error = (bret->status == P9_RSP_OKAY) ? 0 : -EIO;
+    if (error) BUG();
+
+    if (bret->operation == P9_OP_READ) {
+      char astr[11];
+      req_ptr = &(info->past_requests[id]);
+      strncpy (astr, info->page + req_ptr->offset, req_ptr->nrbytes);
+      astr[req_ptr->nrbytes] = "\0";
+      printk ("front-end 'read' %s, for %d bytes", astr, req_ptr->nrbytes);
+    } else {  //OP_WRITE
+      printk ("write op completed\n");
+    }
+}
+    
 static irqreturn_t p9_interrupt(int irq, void *dev_id)
 {
 
@@ -154,23 +144,17 @@ static irqreturn_t p9_interrupt(int irq, void *dev_id)
 	RING_IDX i, rp;
 	unsigned long flags;
 	struct p9_front_info *info = (struct p9_front_info *)dev_id;
-	int error;
 
   printk (KERN_INFO "interrupt");
         spin_lock_irqsave(&info->io_lock, flags);
 
  again:
 	rp = info->ring.sring->rsp_prod;
-//	rmb(); /* Ensure we see queued responses up to 'rp'. */
+	rmb(); /* Ensure we see queued responses up to 'rp'. */
 
 	for (i = info->ring.rsp_cons; i != rp; i++) {
-		unsigned long id;
-
 		bret = RING_GET_RESPONSE(&info->ring, i);
-		id   = bret->id;
-	
-		error = (bret->status == P9_RSP_OKAY) ? 0 : -EIO;
-		if (error) BUG();
+  	        p9_handle_response (bret, info);
 	}
 
 // moving consumer ring pointer
@@ -366,60 +350,84 @@ p9front_closing(struct p9_front_info *info)
 	xenbus_frontend_closed(xbdev);
 	 printk (KERN_INFO "exiting\n");
 }
+/*
+ * temporary strings for testing
+ */
+const char *tstrs[] = {"s 1", "s 2", "s 3", "s4", "s5\n", "s6", "s 7", "s 8", "s 9", "s 10",};
 
 /*
  * Invoked when the backend is finally 'ready' 
  */
 static void p9front_connect(struct p9_front_info *info)
 {
-        grant_ref_t gref_head;
-	//	struct page *apage;
-	struct xenbus_transaction xbt;
-	int err;
-	const char *message = NULL;
+        struct page  *apage;
+	char         *addr;
+	int           i;
+	p9_request_t *ring_req;
 	struct grant *gnt_list_entry = NULL;
-	
+	int           offset = 0;
+
   printk (KERN_INFO "connect");
-  /*err = fill_grant_buffer(info);
-	if (err) {
- printk (KERN_INFO "exiting err\n");
-	        xenbus_dev_fatal(info->xbdev, err, "fill_grant_buffer %s",
-				 info->xbdev->otherend);
-		return;
-		}*/
-	spin_lock_irq(&info->io_lock);
+ 	spin_lock_irq(&info->io_lock);
 	xenbus_switch_state(info->xbdev, XenbusStateConnected);
 	info->connected = P9_STATE_CONNECTED;
 	info->is_ready = 1;
-	/*
-	 * send first piece of data - to test
-	 */
-	data_xfer[0] = 5;
-	
-        gnt_list_entry = get_grant(&gref_head, (unsigned long) virt_to_pfn(data_xfer), info);
-
-	err = xenbus_transaction_start(&xbt);
-	if (err) {
-	   printk (KERN_INFO "exiting err2\n");
-		xenbus_dev_fatal(info->xbdev, err, "starting transaction");
-		goto out;
-	}
-        err = xenbus_printf(xbt, info->xbdev->nodename,
-			    "gref", "%u", gnt_list_entry->gref);
-	if (err) {
-		message = "writing gref";
-		goto abort_transaction;
-	}
-	xenbus_transaction_end(xbt, 0);
 	spin_unlock_irq(&info->io_lock);
-	return ;
-abort_transaction:
-	 printk (KERN_INFO "exiting abort\n");
-	xenbus_transaction_end(xbt, 1);
-	if (message)
-		xenbus_dev_fatal(info->xbdev, err, "%s", message);
-out:
-	 printk (KERN_INFO "exiting\n");
+	/*
+	 * send multiple pieces of data - to test no delays
+	 */
+
+	apage = alloc_page(GFP_NOIO);
+	addr = (char *)page_address (apage);
+	info->page = addr;
+        gnt_list_entry = get_grant((unsigned long) page_to_pfn(apage), info);
+        printk("gref is %u\n", gnt_list_entry->gref);
+
+	for (i = 0; i < 10; i++) {
+ 	    int len = strlen(tstrs[i]) + 1;
+
+            /*
+             *  generate data in shared page
+             */
+            strcpy (addr, tstrs[i]);
+            addr += len;
+	    /*
+             * Fill out a communications ring structure. 
+             */
+            ring_req = RING_GET_REQUEST(&info->ring, info->ring.req_prod_pvt);
+            ring_req->id = i;
+	    ring_req->gref = gnt_list_entry->gref;
+      	    ring_req->offset = offset;
+	    offset += len;
+	    if ((i % 2) == 0) {
+	        /*  
+                 * just want to test 2 things:  Reads and writes
+                 * and whether I'm computing offsets in page correctly.
+                 */
+	        ring_req->nrbytes = len;
+	        ring_req->operation = P9_OP_WRITE;
+	    }
+	    else {
+	         ring_req->operation = P9_OP_READ;
+	         ring_req->nrbytes = (len % 10) + 1;  // want # between 1 and 10
+	    }
+            /*
+             *  Now push the request and notify the other side
+             * for this test - I want some notifications to be separate
+             * and some to be batched
+             */
+     	    info->ring.req_prod_pvt++;
+	    if (i < 5) {
+	      RING_PUSH_REQUESTS (&info->ring);
+	      notify_remote_via_irq (info->irq);
+	    }
+    	} 
+	/*
+         * this should get the last five all at once.
+         */
+        RING_PUSH_REQUESTS (&info->ring);
+        notify_remote_via_irq (info->irq);
+        printk (KERN_INFO "exiting\n");
 	return;
 }
 

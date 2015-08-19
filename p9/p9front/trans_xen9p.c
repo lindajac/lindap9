@@ -91,28 +91,29 @@ void p9_xen_close(struct p9_client *client)
 
 /**
  * req_done - called by handle response when server has completed request
- * @metadata: pointer to a buffer containing:
- *            the original fcall struct
- *            any data sent to the server
- *            any data sent fromt the server - in that order 
+ * @dataptr:  pointer to a buffer containing in this order:
+ *            data sent to the server
+ *            data sent fromt the server
  *
  */
 
-void req_done(void *metadata, struct xen9p_chan *chan, int16_t status)
+void req_done(void *dataptr, struct xen9p_chan *chan, int16_t status,
+	      uint16_t tag)
 {
 	struct p9_fcall *rc;
 	unsigned int offset;
 	struct p9_req_t *req;
 
 	printk("request done\n");
-	memcpy (rc, (struct p9_fcall *) metadata, sizeof (struct p9_fcall));
+
 	/*
 	 *  calls functions in client.c that match requests to responses
 	 *  and wake up the waiting requester
 	 */
-	req = p9_tag_lookup(chan->client, rc->tag);
-	offset = sizeof(struct p9_fcall) + req->tc->size;
-	memcpy (req->rc->sdata, metadata+offset, req->rc->size);
+	req = p9_tag_lookup(chan->client, tag);
+	offset = req->tc->size;
+	rc = req->rc;
+	memcpy (rc->sdata, dataptr+offset, rc->size);
 	p9_client_cb(chan->client, req,  REQ_STATUS_RCVD);
 }
 
@@ -149,14 +150,16 @@ static int p9_xen_request(struct p9_client *client, struct p9_req_t *req)
 	//	struct scatterlist *sgs[2];
 
 	p9_debug(P9_DEBUG_TRANS, "9p debug: virtio request\n");
-
 	req->status = REQ_STATUS_SENT;
 	out_len = req->tc->size;
-	in_len  = req->tc->capacity - out_len;
+	in_len  = req->rc->capacity;
+	/*
+         * fyi all the metadata in the fcalls tc & rc is already in the data
+         */
 	err = p9front_handle_client_request (chan->drv_info,
-					     req->tc, sizeof (struct p9_fcall),
-					     req->tc->sdata, out_len,
-					     req->rc->sdata, in_len);
+					req->tc->tag,
+					req->tc->sdata, out_len,
+					req->rc->sdata, in_len);
 	/* - no scatter gather or queues for now*/
 	
    /*      req_retry:

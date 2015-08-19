@@ -159,7 +159,7 @@ void p9_handle_response(struct p9_response *bret,
 	printk("in handle_response; id is %lu\n", id);
 	used_id[id] = false;
 	addr = &(info->addresses[id]);
-	req_done (addr, info->chan, bret->status);
+	req_done (addr, info->chan, bret->status, bret->tag);
 }
 
 static irqreturn_t p9_interrupt(int irq, void *dev_id)
@@ -314,9 +314,9 @@ void p9front_closing(struct p9_front_info *info)
 }
 
 int p9front_handle_client_request (struct p9_front_info *info,
-				    void *req_metadata, int metadata_len,
-				    char *out_data, int out_len,
-				    char *in_data, int in_len)
+					uint16_t tag,
+					char *out_data, int out_len,
+					char *in_data, int in_len)
 {
 	int err = 0;
 	struct page *apage;
@@ -331,7 +331,7 @@ int p9front_handle_client_request (struct p9_front_info *info,
 		err = -1;  
 		/* wait */goto out;
 	}  
-	tot_sz = out_len + in_len + metadata_len;
+	tot_sz = out_len + in_len;
 	if (tot_sz > PAGE_SIZE) {
 	  	printk ("request too large: out_len is %u and in_len is %u",
 			out_len, in_len);
@@ -359,19 +359,18 @@ int p9front_handle_client_request (struct p9_front_info *info,
 	ring_req->gref = gnt_list_entry->gref;
 	ring_req->offset = info->offset;
 	ring_req->nrbytes = tot_sz;
-	ring_req->metadata_len = metadata_len;
 	ring_req->out_len = out_len;
 	ring_req->in_len = in_len;
+	ring_req->tag = tag;
 	
-        info->addresses[id] = addr;
 	info->offset += ring_req->nrbytes;
-	memcpy (addr, (char *)req_metadata, metadata_len);
-	addr += metadata_len;
 	memcpy (addr, out_data, out_len);
+	addr += out_len;
 	/*
-	 * save above data - I think there's a simpler way
-	 * It might be better to save an array of indices into Ring buffer
+	 * save where to start looking for the input
 	 */
+        info->addresses[id] = addr;
+
 	info->ring.req_prod_pvt++;
 	/*
 	 *  Now push the request and notify the other side
