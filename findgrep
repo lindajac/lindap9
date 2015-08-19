@@ -1,0 +1,2 @@
+#!/bin/sh
+find . -name "*.[ch]" -print0 | xargs -0r grep $1 > log
