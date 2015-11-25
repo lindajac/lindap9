@@ -85,10 +85,11 @@ static int p9_xen_probe(struct xenbus_device *dev,
 	struct xen9p_chan *chan;
 	int    err;
 
-
+	printk(KERN_INFO "\nin xen_probe; nodename is %s\n", dev->nodename);
 	err = xenbus_scanf (XBT_NIL, dev->nodename,
 				    "mount_tag_len","%i", &tag_len);
-	if (err) {
+	printk (KERN_INFO "mount tag len is %i", tag_len);
+	if (err && (tag_len>0)) {
 		tag = kzalloc(tag_len, GFP_KERNEL);
 		if (!tag) {
 			err = -ENOMEM;
@@ -100,8 +101,10 @@ static int p9_xen_probe(struct xenbus_device *dev,
 		*/
 		err = -EINVAL;
 		goto fail;
-	 }
-
+	}
+	err = xenbus_scanf (XBT_NIL, dev->nodename,
+				    "mount_tag","%s", tag);
+	printk (KERN_INFO "mount tag is %s\n", tag);	
 	/*
 	 * allocate the channel;  This is data used when processing 
 	 * 9p client requests
@@ -127,10 +130,12 @@ static int p9_xen_probe(struct xenbus_device *dev,
 	chan->drv_info = info;
 	/* Front end dir is a number, which is used as the id. */
 	dev_set_drvdata(&dev->dev, info);
+	printk (KERN_INFO "set drive data\n");
 	/*
 	 * initialize ring, event chan, etc.
 	 */
 	err = talk_to_9p_back(dev, info);
+       	printk (KERN_INFO "talked to 9p back\n");
 	if (err) {
 		goto xen_err;
 	}
@@ -150,6 +155,7 @@ static int p9_xen_probe(struct xenbus_device *dev,
 		goto out_free_tag;
 	}
 	init_waitqueue_head(chan->vc_wq);
+	printk (KERN_INFO "wait q head initialized\n");
 
 	/* Ceiling limit to avoid denial of service attacks
 	 * need to figure out what it should be
@@ -319,9 +325,10 @@ static int __init xlp9_init(void)
 {
 	int ret = 0;
 
-	init_xen_9p();
-
+	
 	printk(KERN_INFO "\n\n in p9_init\n");
+	init_xen_9p();
+	printk (KERN_INFO "returned from init_xen_9p");
 	p9front_driver.driver.name = "p9";
 	p9front_driver.driver.owner = THIS_MODULE;
 	ret = xenbus_register_frontend(&p9front_driver);

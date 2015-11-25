@@ -387,6 +387,7 @@ int p9front_handle_client_request (struct p9_front_info *info,
 
 void p9front_connect(struct p9_front_info *info)
 {
+  printk(KERN_INFO "\nin p9front_connect\n");
 	spin_lock_irq(&info->io_lock);
 	xenbus_switch_state(info->xbdev, XenbusStateConnected);
 	info->connected = P9_STATE_CONNECTED;

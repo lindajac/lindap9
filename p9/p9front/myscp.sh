@@ -1,3 +1,3 @@
 #!/bin/sh
-sudo scp p9*.* root@192.168.0.19:~
+sudo scp p9*.ko root@192.168.0.24:~
 

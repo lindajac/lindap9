@@ -1,5 +1,5 @@
 #!/bin/sh
-sudo xl unpause testg
-sudo xl console testg
+sudo xl unpause testnok
+sudo xl console testnok
 
 

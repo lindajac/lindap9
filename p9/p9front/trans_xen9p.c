@@ -436,8 +436,11 @@ static struct p9_trans_module p9_xen_trans = {
 */
 void init_xen_9p(void)
 {
+  printk(KERN_INFO "entering init_xen_9p\n");
 	INIT_LIST_HEAD(&xen9p_chan_list);
+	printk(KERN_INFO "just init chan_list\n");
 	v9fs_register_trans(&p9_xen_trans);
+	printk(KERN_INFO "just registered transport\n");
 }
 
 /*
